@@ -1,5 +1,3 @@
-<script type="text/javascript" src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=default"></script>
-
 # Video Based Recondstruction of 3D People Models
 
 ## 1. Introduction
@@ -53,16 +51,94 @@ T(β, θ, D) = T_μ + B_S(β) + B_P(θ) + D
 
 ### 3.2 Step 1: Pose Reconstruction
 
-[7] 中考虑 P=5 帧，根据这 5 帧的姿势优化得到一个单独的人体形状。这种方式代价十分昂贵，需要同时在内存中存储复数模型。而且我们的实验表明，即使用很多帧进行处理，姿势的不同会引起额外的 3D ambiguities。
+首先初始化一个 base_smpl 模型，并从视频中取五帧。根据视角等参数，逐帧训练，调整 base_smpl 的参数，使它能够尽量接近每帧里面人的形状。
 
-因此，如果这个人的身高已知，那么在优化中直接拿身高数值进行限制。即使身高未知，我们的方法误差也很小。
+使用五帧训练得到一个粗糙的 beta 模型。然后对整个视频逐帧训练，优化这个smpl模型。
 
-camera.pkl + keypoints.hdf5 + masks.hdf5 => reconstructed_poses.hdf5
+最终存储 SMPL 模型的 trans pose 和 beta 数据到 reconstructed_poses.hdf5
+
+camera.pkl + keypoints.hdf5 + masks.hdf5 =>reconstructed_poses.hdf5
 
 ### 3.3 Step 2: Consensus Shape
+SMPL 模型中，人体网格模型中的顶点 vi 可由参数 β θ 得到。（具体公式见论文）
+
+根据该公式，可以得到每个 vi 对应的 ray r 的公式
+
+![unposing](./image/unposing.png)
+
+看 Fig 3，有了每个顶点对应的ray r 之后，可以 unpose the silhouette cone
+ 并且限制标准 T 型模型。使用 unposing 的方法可以避免 blend-shape 的计算，显著减少内存使用.
+
+我们的目标是优化下式
+
+```
+E_cons = E_data + w_lp*E_lp + w_var*E_var + w_sym*E_sym
+```
+
+在给定形状参数 β (`model_template.betas`) 和 vertex offset D (`base_smpl.v_personal`) 下，最小化上式。目标 E_cons 由数据项 E_data 和正则项 E_lp, E_var, E_sym 组成(每个正则项各有一个 w_* 权重参数)。
+
+- **E_data: Data Term**
+    - 衡量三维模型中顶点与 rays 之间的距离的项。
+    - 
+
+- **E_lp: Laplacian Term**
+    - Smooth deformation
+
+- **E_var: Body Model Term**
+    - 对于 reconstructed free-form vertices v(β_0, D)
+
+- **E_sym: Symmetry Term**
+    - 人类一般是关于Y轴对称的
 
 camera.pkl + masks.hdf5 + reconstructed_poses.hdf5 => consensus.obj + consensus.pkl
 
 ### 3.4 Step 3: Frame Refinement and Texture Generation
 
 consensus.pkl + camera.pkl + masks.hdf5 + reconstructed_poses.hdf5 => texture.jpg
+
+
+# Detailed Human Avatars from MonocularVideo
+
+## 1. Introduction
+
+我们使用 SMPL 获得人的姿势；然后将 an inverse pose transformation 应用于每一帧的 projection rays and normal fields，得到一个标准 T-pose；最后 optimize a high-resolution shape regularized by SMPL
+
+与之前的工作主要有四点不同
+- Facial landmarks
+    - 脸部是模型重要的一部分，我们在三维模型重建时使用了二维 facial landmark detections。为了健壮性，我们将 landmark projection rays 变换到了 joint T-pose 的空间上
+- Illumination and shape-from-shading
+    - 利用灰度图片的亮度信息，根据亮度生成原理，求得每个像素在3D空间中的法向量，根据法向量球的深度信息 depth data。Shading 能够使生成的模型具有皱纹等细节。事实上大部分 shape-from-shading 方法也都是为了让静态物体具有更多细节。我们在此对每一帧做 shape-from-shading，获取逐帧的 partial 3D normal fields，结果将被变换至 T-pose 空间。
+- Efficient texture stitching
+    - 对于移动中的物体如何从多视角进行无缝的纹理拼接是很难的。需要把RGB值赋给每个纹理的像素点上，同时保证空间上的 smoothness。我们使用了一种新的方式叫 texture update energy function
+- Semantic textur stitching
+    - 除了纹理拼接，还有一个问题使 texture spilling。比如衣服的纹理可能会渲染到皮肤的区域中。为了减小这种溢出，我们为 texture update energy 添加了一个语义项。当某个像素点上的RGB值不太像这块区域的时候，这个语义项会给予惩罚。这个语义项显著的减少了溢出问题，并且有助于同一块区域的颜色尽量接近
+
+## 3. Method
+
+![method](./image/meth.png)
+
+### 3.1. SubdividedSMPLbodymodel 
+
+原始 SMPL 模型
+
+```
+M(β,θ,D) = W(T(β,θ,D),J(β),θ,W) (1) 
+T(β,θ,D) = T + B_s(β) + B_p(θ) + D (2)
+```
+
+![subdivide](./image/subdivide.png)
+
+为了得到更细致的模型，将原始 SMPL 模型细化。如 Fig 3 所示，原本三个点构成的三角形网格，两两之间取中点后加一个偏置项得到新的点。
+
+```
+v_(N+e) = 0.5(v_i + v_j) + s_e*n_e
+
+// 对于点对 v_i 和 v_j，n_e 是两点的法向量的平均向量；s_e 则是在 n_e 方向上的位移
+```
+得到新模型 `M_f(β,θ,D,s)`。 这样的新模型中 n_e 在初始化时就计算得到，s_e ∈ s 为参数。
+
+而 s 由下式计算得到
+
+![minimize](./image/minimize.png)
+
+### 3.2. Medium-levelbodyshapereconstruction 
