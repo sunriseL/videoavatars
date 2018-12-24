@@ -79,7 +79,6 @@ E_cons = E_data + w_lp*E_lp + w_var*E_var + w_sym*E_sym
 
 - **E_data: Data Term**
     - 衡量三维模型中顶点与 rays 之间的距离的项。
-    - 
 
 - **E_lp: Laplacian Term**
     - Smooth deformation
@@ -141,4 +140,30 @@ v_(N+e) = 0.5(v_i + v_j) + s_e*n_e
 
 ![minimize](./image/minimize.png)
 
-### 3.2. Medium-levelbodyshapereconstruction 
+### 3.2. Medium-level body shape reconstruction 
+
+之前，我们的工作为了还原身体形状、头发、衣服等，选择了大约 120 个关键帧，使用 CNN 将图片分为前景和背景。基于 2D landmark 还原 3D 姿势。核心在于，使用 SMPL 的 inverse formulation 将每帧的 silhouette cone 还原到 SMPL 的标准 T-pose。（应该就是上一篇论文中的 unpose）然而这种方式脸部精度很低，因此我们提出一个新的优化目标
+
+![new-objective](./image/new-objective.png)
+
+E_silh 是上一篇论文的的 E_data，E_regm 正则项应该就是上一篇论文中的其余三项。
+
+**Attention!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!**
+
+E_face是新提出的，it penalizes the distance between the 2D facial landmark detections and the 2D projection of 3D facial landmarks。我们使用OpenPose[73]来探测每一帧的 2D facial landmark。
+
+为了实现这一点，我们首先要建立 landmarks 和 人体网格的点之间的静态映射。每个 landmark 都要被映射到人体模型表面 via barycentric interpolation of neighboring vertices。
+
+在优化过程中，要衡量模型上的 landmark `l` 到 camera ray `r` 之间的 点到线 的距离 
+
+```
+δ(l, r) = l × r_n - r_m
+```
+
+where r = (r_m, r_n) is given in Plucker coordinates(普吕克坐标)
+
+![face-term](./image/face-term.png)
+
+其中 L 定义了 landmark 到 camera ray 的映射；w 是由 CNN 给出的对应 landmark 的置信度；ρ 是  Geman-McClure robust cost function。使用 Eq.1 的 SMPL 模型来加速训练。
+
+### 3.3. Modelingﬁne-levelsurfacedetails 
